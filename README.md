@@ -1,153 +1,123 @@
-# Siri Remote → Mac Controller
+# Siri Remote → Mac
 
-Use a Bluetooth-paired **Apple Siri Remote (A1962)** as a custom input device for
-macOS. All physical buttons are mapped to Mac actions with **tap vs hold**
-detection and two switchable **modes** (MEDIA / NAV).
+Turn a Bluetooth-paired Apple Siri Remote into a macOS input device, with tap-vs-hold and two modes.
 
-> **Touchpad slide-as-mouse is NOT supported** and (from a userspace script)
-> not achievable on macOS — see [Limitations](#limitations). The touchpad
-> **click** works; the touchpad **slide** does not.
+**Status:** Working · first commit 2026-09-04 · private
 
----
+> [!NOTE]
+> This repository is private. The file links below resolve only for people who have access to it.
 
-## Quick start
+|  |  |
+|---|---|
+| **What it is** | A userspace macOS controller for the Apple Siri Remote (A1962) |
+| **Who it's for** | Mac users who want a couch remote — and anyone reverse-engineering Apple HID |
+| **Live at** | — (a local script, not a hosted service) |
+| **Stack** | Python 3 · hidapi · PyObjC / Quartz `CGEvent` · macOS |
+| **Status** | Working · 7 buttons, tap and hold, 2 modes · ~500 lines · one commit, 2026-09-04 |
+
+Siri Remote → Mac reads the remote's Bluetooth HID button reports and posts native macOS
+events for them. The usual answer to "can I use this remote with my Mac?" is a commercial
+utility with a privileged driver component. This is about 500 lines of Python you can read,
+plus the reverse-engineered protocol written down next to it.
+
+## The problem
+
+The Siri Remote is a good piece of hardware that macOS ignores. Pair it over Bluetooth and
+the system will register it, take the volume and play keys for itself, and do nothing with
+the other five buttons. There is no Apple-supplied way to bind them.
+
+The buttons are not actually hidden — they arrive on a standard HID interface as a two-byte
+bitmask. What makes a naive script unusable is that the remote **autorepeats**: hold a button
+and it emits rapid press/release cycles, so every hold reads as a burst of taps and tap-vs-hold
+detection collapses. Solving that debounce is most of the value here; the rest is a mapping table.
+
+The touchpad **slide** is a different story, and it is a dead end from userspace. That is
+documented rather than worked around — see [Known limitations](#known-limitations).
+
+## Quickstart
 
 ```bash
-cd appletv-remote-mac
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python controller.py
 ```
 
-### Required macOS permissions
-Grant the program running Python (Terminal / iTerm / your IDE) both:
-- **Input Monitoring** — System Settings → Privacy & Security → Input Monitoring
-- **Accessibility** — System Settings → Privacy & Security → Accessibility
+**Two things to do first, or nothing will happen:**
 
-Without these, the remote won't be read and synthetic events won't post.
+1. **Pair the remote.** Unplug it from power (BLE only works on battery), hold **Menu + Volume Up**
+   for ~5 s, then pair in System Settings → Bluetooth. It sleeps aggressively — press any button to
+   wake it before launching, or you will get `Remote not found`.
+2. **Grant two permissions** to whatever runs Python (Terminal, iTerm, your IDE): **Input Monitoring**
+   and **Accessibility**, both under System Settings → Privacy & Security. Without them the remote is
+   never read and synthetic events are never posted.
 
-### Pairing the remote
-1. Unplug the remote from power (BLE only works on battery).
-2. Hold **Menu + Volume Up** ~5 s to enter pairing mode.
-3. Pair it in System Settings → Bluetooth.
-4. The remote sleeps aggressively — **press any button to wake it** before
-   launching `controller.py`. If you see `Remote not found`, wake it and retry.
+## What it does
 
----
+- **Maps every physical button** — Volume ±, Play, TV/AirPlay, Siri, Menu and the touchpad click.
+- **Distinguishes tap from hold** at a 0.5 s threshold, so each button carries two actions.
+- **Switches modes** — hold Menu to toggle MEDIA (playback, volume, brightness, Mission Control,
+  Siri, Spotlight) and NAV (arrows, Page Up/Down, Enter, click).
+- **Debounces the remote's autorepeat**, which is what makes hold detection reliable at all.
+- **Documents the protocol it decodes** — GATT layout, the enable handshake, report formats — in
+  [`PROTOCOL.md`](PROTOCOL.md), so the mapping table is extensible rather than magic.
 
-## Button mappings
+### Mappings
 
-Tap = quick press. **HOLD** = press longer than `HOLD_THRESHOLD` (0.5 s).
-Switch modes by **holding Menu**.
-
-### MEDIA mode (default)
-| Button | Tap | Hold |
-|--------|-----|------|
-| Vol +  | Volume Up | Brightness Up |
-| Vol −  | Volume Down | Brightness Down |
-| Play   | Play/Pause | Next Track |
-| Touchpad click | Left Click | Right Click |
-| TV     | Mission Control | Launchpad |
-| Siri   | **Siri** (listening) | Spotlight |
-| Menu   | Escape | → switch to NAV mode |
-
-### NAV mode (keyboard navigation)
-| Button | Tap | Hold |
-|--------|-----|------|
-| Vol +  | Up arrow | Page Up |
-| Vol −  | Down arrow | Page Down |
-| TV     | Left arrow | — |
-| Play   | Right arrow | — |
-| Touchpad click | Enter / Select | Left Click |
-| Siri   | **Siri** | Spotlight |
-| Menu   | Escape | → switch to MEDIA mode |
-
----
+| Button | MEDIA tap | MEDIA hold | NAV tap | NAV hold |
+|---|---|---|---|---|
+| Vol + | Volume Up | Brightness Up | Up arrow | Page Up |
+| Vol − | Volume Down | Brightness Down | Down arrow | Page Down |
+| Play | Play/Pause | Next Track | Right arrow | — |
+| TV | Mission Control | Launchpad | Left arrow | — |
+| Touchpad click | Left Click | Right Click | Enter / Select | Left Click |
+| Siri | Siri | Spotlight | Siri | Spotlight |
+| Menu | Escape | → NAV mode | Escape | → MEDIA mode |
 
 ## How it works
 
-- The remote exposes several HID interfaces over Bluetooth. Buttons arrive on
-  the **Consumer Control** interface (`usage_page 0x0c`, `usage 0x01`) as a
-  2-byte report: `fa <bitmask>`.
-- `controller.py` opens that interface with **hidapi**, decodes the bitmask, and
-  posts macOS events via **Quartz CGEvent** (`mac_actions.py`).
-- The remote **autorepeats** held buttons as rapid press/release cycles. The
-  controller **debounces** these (`DEBOUNCE = 0.18 s`): a release is only "real"
-  if no new press of the same bit arrives within the window. Hold duration is
-  measured from first press to final real release. This is what makes tap vs
-  hold reliable.
+The remote exposes eight HID interfaces over Bluetooth. Buttons arrive on the Consumer Control
+interface (`usage_page 0x0c`, `usage 0x01`) as a two-byte report, `fa <bitmask>`. `controller.py`
+opens that interface with [hidapi](https://github.com/libusb/hidapi), decodes the bitmask, and posts
+macOS events through Quartz `CGEvent` in `mac_actions.py`. macOS enables the input stream itself, so
+the `0xAF` write the Linux drivers send is not needed on this platform.
 
-### Button bitmask (`byte[1]`)
-| Bit | Button |
-|-----|--------|
-| 0x01 | TV / AirPlay |
-| 0x02 | Volume Up |
-| 0x04 | Volume Down |
-| 0x08 | Play/Pause |
-| 0x10 | Siri (mic) |
-| 0x20 | Menu |
-| 0x80 | Touchpad click |
+Hold detection is the non-obvious part. A release only counts as real when no new press of the same
+bit arrives within `DEBOUNCE` (0.18 s) — shorter than a deliberate re-press, longer than the autorepeat
+gap. Hold duration is then measured from the first press to that final real release, and compared
+against `HOLD_THRESHOLD` (0.5 s).
 
-See [`PROTOCOL.md`](PROTOCOL.md) for the full reverse-engineered BLE/HID protocol.
+### Repository layout
 
----
+```text
+.
+├── controller.py     # main app — opens the HID interface, debounces, dispatches actions
+├── mac_actions.py    # macOS event primitives: keys, clicks, media keys, Siri, Spotlight, Launchpad
+├── requirements.txt  # hidapi + PyObjC (Quartz, Cocoa, CoreBluetooth)
+├── PROTOCOL.md       # reverse-engineered BLE/HID protocol for the A1962
+├── PROGRESS.md       # session log, verified behaviour, and how to resume
+└── research/         # diagnostic scripts from the reverse engineering — not needed to run the app
+```
 
-## Files
+Entry point: `controller.py`. The read loop is `poll_releases()`; the two mapping tables are
+`_do_media()` and `_do_nav()`. Protocol groundwork is owed to
+[SiriRemote-Linux](https://github.com/Yanndroid/SiriRemote-Linux).
 
-| File | Purpose |
-|------|---------|
-| `controller.py` | **Main app.** Reads buttons, debounces, dispatches actions. |
-| `mac_actions.py` | macOS event primitives (keys, clicks, media keys, Siri, Mission Control, Spotlight, Launchpad). |
-| `PROTOCOL.md` | Reverse-engineered BLE/HID protocol notes. |
-| `PROGRESS.md` | Session history + how to resume. |
-| `requirements.txt` | Python dependencies. |
-| `research/` | Exploratory/diagnostic scripts used during reverse engineering (not needed to run the controller). |
+## Known limitations
 
-### `research/` scripts (for reference / debugging)
-- `capture_bt.py` — dump raw HID reports from every interface (best diagnostic).
-- `dump_descriptors.py` — print HID report descriptors.
-- `seize_touch.py` — IOKit seize + raw input-report callback (proves the
-  digitizer is exclusively held by macOS; see Limitations).
-- `iohid_touch.py`, `touch_tap.py`, `enable_touch*.py`, `enable_input.py` —
-  various (unsuccessful) attempts to enable/read the touchpad slide.
-- `remote_ble.py`, `ble_scan.py` — CoreBluetooth experiments (HID service is
-  blocked by macOS).
-- `test_actions.py` — fire each macOS action with a countdown to verify injection.
+- **Touchpad slide-as-cursor is not achievable from userspace — confirmed, not assumed.** CoreBluetooth
+  cannot see the HID service (`0x1812`); IOKit `SET_REPORT` accepts the `0xAF` enable but never transmits
+  it; seizing the digitizer returns `kIOReturnExclusiveAccess`; a shared open delivers zero reports because
+  macOS consumes them. Doing it properly needs a signed DriverKit HID system extension. The touchpad
+  **click** works.
+- **macOS keeps its native handling of Volume and Play**, so in NAV mode Vol± also nudges system volume.
+  Suppressing that needs a `CGEventTap`.
+- **Mappings are constants in `controller.py`.** No config file, and no launch agent — it does not start
+  at login.
+- **One device, one revision.** Written and tested against the A1962 (2nd-gen Siri Remote), VID `0x004C`
+  / PID `0x026D`.
 
----
+## License
 
-## Limitations
-
-### Touchpad slide (cursor) is not achievable from userspace — confirmed
-We exhausted every userspace path:
-
-- **CoreBluetooth**: macOS blocks the HID service (`0x1812`) from all apps. Only
-  Device Info / Battery are visible. The `0xAF` enable write can't be sent.
-- **IOKit SET_REPORT (`0xAF`)**: accepted locally but never transmitted to the
-  device; touch never starts.
-- **Seizing the digitizer** (`kIOHIDOptionsTypeSeizeDevice`): fails with
-  `kIOReturnExclusiveAccess` (`0xE00002C5`) — macOS's own driver holds it.
-- **Shared open + raw input-report callback**: opens, but macOS delivers **zero**
-  digitizer reports (it consumes them).
-- macOS parses the touch report as an **opaque vendor blob** (no X/Y usages), so
-  it neither uses it (cursor doesn't move) nor forwards it.
-
-Tools like **BetterTouchTool** / **Remote Buddy** get the touchpad only via a
-privileged driver-level component. Replicating that requires a signed
-**DriverKit HID system extension** (Apple Developer account + entitlements +
-notarized installer) — a separate, much larger project.
-
-### Other notes
-- macOS handles **Volume / Play** natively too, so in NAV mode pressing Vol±
-  also nudges system volume. A future enhancement could suppress native media
-  keys via a `CGEventTap` while in NAV mode.
-- The remote sleeps quickly; wake it before launching.
-
----
-
-## Possible next steps
-- Suppress native media keys in NAV mode (CGEventTap).
-- Auto-start at login (launchd plist / `launchctl`).
-- Config file for custom mappings.
-- (Ambitious) DriverKit dext to unlock the touchpad slide.
+MIT is the intent for this repository. **No `LICENSE` file is committed yet** — add one before making
+the repository public.
