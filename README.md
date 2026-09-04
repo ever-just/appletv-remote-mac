@@ -2,10 +2,7 @@
 
 Turn a Bluetooth-paired Apple Siri Remote into a macOS input device, with tap-vs-hold and two modes.
 
-**Status:** Working · first commit 2026-09-04 · private
-
-> [!NOTE]
-> This repository is private. The file links below resolve only for people who have access to it.
+**Status:** Working · first commit 2026-09-04 · public
 
 |  |  |
 |---|---|
